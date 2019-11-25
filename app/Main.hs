@@ -6,18 +6,31 @@
 module Main where
 
 import qualified Language.C.Inline          as C
-import           Control.Monad.Trans.Except      (ExceptT)
-import           Control.Exception               (Exception)
+import           Control.Monad                   (void)
+import           Control.Monad.IO.Class          (MonadIO, liftIO)
+import           Control.Monad.Trans.Except      (ExceptT, runExceptT)
+import           Control.Exception               (Exception, throw)
+import           Data.Text                       (Text)
 import           Data.Data
 
 C.include "portaudio.h"
 
-data PaConnectionStatus = PaInitialized | PaClosed
+data PaConnectionStatus = PaInitialized | PaTerminated
 
-type PaMonad (s :: PaConnectionStatus) a = ExceptT PaErrorCode IO a
+data PaConnection (connStatus :: PaConnectionStatus) = MkConnection
 
-initializePa :: PaMonad PaClosed -> PaMonad PaInitialized
-initializePa _ = runExceptT
+type PaMonad a = ExceptT PaErrorCode IO a
+
+initializePa :: PaMonad (PaConnection 'PaInitialized)
+initializePa = do liftIO [C.exp| int { Pa_Initialize() } |]
+                  return MkConnection
+
+terminatePa :: PaConnection 'PaInitialized -> PaMonad (PaConnection 'PaTerminated)
+terminatePa _ = do liftIO [C.exp| int { Pa_Terminate() } |]
+                   return MkConnection
+
+terminatePa' :: PaConnection 'PaInitialized -> PaMonad ()
+terminatePa' = void . terminatePa
 
 data PaErrorCode =
     PaNotInitialized
@@ -61,7 +74,6 @@ codeToPaError code =
        else PaError
 
 type PaTime        = Double
-type PaDeviceInfo  = Int
 
 data PaDeviceInfo = PaDeviceInfo
   { paDeviceName                     :: Text
@@ -74,19 +86,22 @@ data PaDeviceInfo = PaDeviceInfo
   , paDeviceDefaultSampleRate        :: Double
   } deriving (Show)
 
-getDeviceCount :: PaMonad PaInitialized Int
-getDeviceCount = do
+getDeviceCount :: PaConnection 'PaInitialized -> PaMonad Int
+getDeviceCount _ = do
   numDevices <- liftIO $ fromIntegral <$> [C.exp| int { Pa_GetDeviceCount() } |]
   if numDevices < 0
-    then return $ Left (codeToPaError numDevices)
-    else return (Right numDevices)
+    then throw (codeToPaError numDevices)
+    else return numDevices
 
-getDevices :: Int -> PaMonad PaInitialized [PaDeviceInfo]
-getDevices 0 = return []
-getDevices devicesCount = undefined
+getDevices :: PaConnection 'PaInitialized -> Int -> PaMonad [PaDeviceInfo]
+getDevices _ 0 = return []
+getDevices _ devicesCount = undefined
 
-
-main :: PaMonad
+main :: IO ()
 main = do
-  numDevices <- getDeviceCount
-  print numDevices
+  runExceptT $ do
+    conn <- initializePa
+    numDevices <- getDeviceCount conn
+    liftIO $ print numDevices
+    terminatePa' conn
+  return ()
