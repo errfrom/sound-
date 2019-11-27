@@ -24,6 +24,7 @@ dependencies:
 - inline-c
 - transformers
 - text
+- simple-log
 
 library:
   source-dirs: src

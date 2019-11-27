@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
+
 {-# LANGUAGE QuasiQuotes                        #-}
 {-# LANGUAGE TemplateHaskell                    #-}
 {-# LANGUAGE ExtendedDefaultRules               #-}
@@ -9,23 +11,26 @@
 module Main where
 
 import qualified Language.C.Inline          as C
-import           Foreign.C.Types                 (CInt)
-import           Foreign.Ptr                     (Ptr)
-import           Foreign.C.String                (peekCString)
-import           Foreign.Storable                (Storable)
+import           Foreign.C.Types                   (CInt)
+import           Foreign.Ptr                       (Ptr)
+import           Foreign.C.String                  (peekCString)
+import           Foreign.Storable                  (Storable)
 import qualified Foreign.Marshal.Alloc      as Ptr
 
-import           Control.Monad.IO.Class          (liftIO)
-import           Control.Monad.Trans.Except      (ExceptT, runExceptT)
-import           Control.Monad.Trans.Reader      (ReaderT(..), ask)
-import           Control.Exception               (Exception, throw)
+import           Control.Monad.IO.Class            (liftIO)
+import           Control.Monad.Trans.Except        (ExceptT, runExceptT)
+import           Control.Monad.Trans.Reader        (ReaderT(..), ask)
+import           Control.Exception                 (Exception, throw)
 
-import           Data.Typeable                   (cast)
+import           System.Log.Simple                 (Log, Level(..))
+import qualified System.Log.Simple          as Log
+
+import           Data.Typeable                     (cast)
 import           Data.Data
 import           Data.IORef
-import           Data.Text                       (Text)
-import           Data.String                     (IsString(..))
-import qualified Data.List                  as L (partition)
+import           Data.Text                         (Text)
+import           Data.String                       (IsString(..))
+import qualified Data.List                  as L   (partition)
 
 default (Text)
 
@@ -40,6 +45,7 @@ instance Eq AnyPointer where
 
 data Pa = Pa
  { heapPointers :: IORef [AnyPointer]
+ , paLogger     :: Log
  }
 
 type PaMonad a   = ReaderT Pa (ExceptT PaErrorCode IO) a
@@ -119,11 +125,24 @@ paMayThrow action = liftIO action >>= \x ->
 runPaT :: PaMonad a -> IO (Either PaErrorCode a)
 runPaT action = do
   hp <- newIORef mempty
-  let pa = Pa hp
+  let logConfig  = Log.logCfg [(fromString "", Debug)]
+  let logHandler = Log.handler Log.text Log.coloredConsole : []
+  logger <- Log.newLog logConfig logHandler
+  let pa = Pa hp logger
   runExceptT . flip runReaderT pa $ do
     _ <- paMayThrow [C.exp| int { Pa_Initialize() } |]
     result <- action
     _ <- paMayThrow [C.exp| int { Pa_Terminate()  } |]
+
+    hp <- ask >>= liftIO . readIORef . heapPointers
+    if not (null hp)
+      then do
+        logger <- ask >>= return . paLogger
+        let logMessage = fromString "Memory not fully deallocated."
+        Log.writeLog logger Debug logMessage
+        pmFreeAll
+      else return ()
+
     return result
 
 data PaDeviceInfo = PaDeviceInfo
